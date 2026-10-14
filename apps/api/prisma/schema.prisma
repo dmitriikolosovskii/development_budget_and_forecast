@@ -1,0 +1,322 @@
+// Data model: howItWorks/shared/CONTRACTS.md §2. Money = Int euro cents (net), quantities = Int milli-units,
+// rates = Int basis points, calendar dates = String YYYY-MM-DD, drawing geometry = Int centimetres.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum CostCategory {
+  LAND
+  ARCHITECTURE
+  MATERIALS
+  CONSTRUCTION
+  MARKETING
+}
+
+enum ItemKind {
+  MATERIAL
+  WORK
+  SERVICE // fees, taxes, marketing, land
+}
+
+enum ItemStatus {
+  PLANNED
+  PARTIAL
+  CONTRACTED
+  DONE
+}
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  COMPLETED
+}
+
+enum OrgRole {
+  SUPPLIER
+  CONTRACTOR
+  CONSULTANT
+  AGENCY
+  AUTHORITY
+}
+
+enum UtilityType {
+  WATER
+  SEWER
+  STORMWATER
+  POWER
+  GAS
+  TELECOM
+  DISTRICT_HEATING
+}
+
+enum UtilityStatus {
+  CONNECTED
+  AT_BOUNDARY
+  IN_STREET
+  NOT_AVAILABLE
+}
+
+enum HouseSection {
+  SITE_FOUNDATION
+  STRUCTURE
+  ROOF
+  OPENINGS
+  ELECTRICAL
+  PLUMBING
+  HEATING_VENTILATION
+  INTERIOR_FINISHES
+  FACADE_INSULATION
+  EXTERIOR
+}
+
+enum DeliveryKind {
+  EXPECTED
+  DELIVERED
+}
+
+model Project {
+  id            String            @id @default(cuid())
+  slug          String            @unique
+  name          String
+  code          String // "KF-2026-01"
+  status        ProjectStatus     @default(PLANNING)
+  isTemplate    Boolean           @default(false) // template for the wizard, hidden from lists
+  clientName    String
+  city          String
+  startDate     String // YYYY-MM-DD
+  endDate       String
+  markupBps     Int               @default(1500)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  budgetLines   BudgetLine[]
+  items         CostItem[]
+  land          LandParcel?
+  plan          ArchitecturePlan?
+  deliveries    Delivery[]
+  importBatches ImportBatch[]
+}
+
+/// A budget line = a tab sub-section (CONTRACTS §4).
+model BudgetLine {
+  id            String       @id @default(cuid())
+  projectId     String
+  category      CostCategory
+  section       String // slug: "electrical"
+  name          String
+  approvedCents Int
+  sortOrder     Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  project       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items         CostItem[]
+
+  @@unique([projectId, category, section])
+}
+
+/// One table row on any tab.
+model CostItem {
+  id                String        @id @default(cuid())
+  projectId         String
+  budgetLineId      String
+  kind              ItemKind
+  code              String // "MAT-ELE-003", unique within the project; CSV import key
+  name              String
+  description       String?
+  unit              String
+  qtyMilli          Int
+  unitPriceCents    Int
+  committedCents    Int           @default(0) // contract/order amount
+  actualCents       Int           @default(0) // invoiced/paid
+  status            ItemStatus    @default(PLANNED)
+  supplierId        String?
+  contractorId      String?
+  deliveryDate      String? // MATERIAL: expected/confirmed delivery
+  deliveredDate     String? // MATERIAL: actual delivery
+  startDate         String? // WORK/SERVICE
+  endDate           String? // WORK/SERVICE
+  requiredForWorkId String? // MATERIAL → the WORK it is needed for
+  boqComponentId    String? // MATERIAL → a takeoff row in Architecture
+  sortOrder         Int           @default(0)
+  notes             String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  project           Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  budgetLine        BudgetLine    @relation(fields: [budgetLineId], references: [id], onDelete: Cascade)
+  supplier          Organization? @relation("supplier", fields: [supplierId], references: [id])
+  contractor        Organization? @relation("contractor", fields: [contractorId], references: [id])
+  requiredForWork   CostItem?     @relation("needs", fields: [requiredForWorkId], references: [id], onDelete: SetNull)
+  requiredMaterials CostItem[]    @relation("needs")
+  boqComponent      BoqComponent? @relation(fields: [boqComponentId], references: [id], onDelete: SetNull)
+  deliveries        Delivery[]
+
+  @@unique([projectId, code])
+  @@index([budgetLineId])
+}
+
+/// Shared across all projects.
+model Organization {
+  id               String     @id @default(cuid())
+  slug             String     @unique
+  name             String
+  role             OrgRole
+  legalForm        String? // GmbH, GmbH & Co. KG, e.K.
+  address          String
+  city             String
+  website          String?
+  email            String
+  phone            String
+  contactPerson    String
+  contactRole      String
+  paymentTermsDays Int        @default(30)
+  rating           Int? // 1..5
+  notes            String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  suppliedItems    CostItem[] @relation("supplier")
+  contractedItems  CostItem[] @relation("contractor")
+}
+
+model LandParcel {
+  id                  String              @id @default(cuid())
+  projectId           String              @unique
+  address             String
+  postalCode          String
+  municipality        String
+  district            String?
+  state               String // Bundesland
+  cadastralRef        String? // "Gemarkung X, Flur 3, Flurstück 512/4"
+  lat                 Float
+  lng                 Float
+  areaM2              Int
+  plotWidthCm         Int
+  plotDepthCm         Int
+  landValuePerM2Cents Int // Bodenrichtwert
+  zoningPlan          String // B-Plan
+  grzBps              Int
+  gfzBps              Int
+  maxStoreys          Int
+  roofRules           String
+  buildingLineNotes   String?
+  soilType            String
+  soilClass           String
+  bearingCapacityKnM2 Int?
+  groundwaterDepthCm  Int?
+  contaminationNotes  String?
+  slopeNotes          String?
+  orientation         String?
+  notes               String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  project             Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  utilities           UtilityConnection[]
+}
+
+model UtilityConnection {
+  id        String        @id @default(cuid())
+  landId    String
+  type      UtilityType
+  status    UtilityStatus
+  distanceM Int?
+  provider  String?
+  notes     String?
+  land      LandParcel    @relation(fields: [landId], references: [id], onDelete: Cascade)
+
+  @@unique([landId, type])
+}
+
+model ArchitecturePlan {
+  id               String         @id @default(cuid())
+  projectId        String         @unique
+  name             String
+  architectOrgId   String? // Organization (CONSULTANT)
+  style            String
+  storeys          Int
+  roofType         String
+  roofPitchDeg     Int
+  energyStandard   String
+  heatingSystem    String
+  occupants        Int            @default(4)
+  footprintWidthCm Int
+  footprintDepthCm Int
+  siteOffsetXcm    Int // house position on the plot
+  siteOffsetYcm    Int
+  notes            String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  project          Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rooms            Room[]
+  components       BoqComponent[]
+}
+
+/// Rectangles → SVG floor plan.
+model Room {
+  id        String           @id @default(cuid())
+  planId    String
+  code      String // "GF-LIV"
+  floor     Int // 0 = ground floor
+  name      String
+  kind      String // living|kitchen|bedroom|bath|wc|hall|utility|storage|office|stairs
+  xCm       Int
+  yCm       Int
+  wCm       Int
+  hCm       Int
+  sortOrder Int              @default(0)
+  plan      ArchitecturePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@unique([planId, code])
+}
+
+/// Takeoff: what and how much the house needs.
+model BoqComponent {
+  id              String           @id @default(cuid())
+  planId          String
+  code            String // "BOQ-STR-002"
+  houseSection    HouseSection
+  name            String
+  unit            String
+  qtyMilli        Int
+  materialSection String? // MATERIALS line section slug
+  notes           String?
+  sortOrder       Int              @default(0)
+  plan            ArchitecturePlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  costItems       CostItem[]
+
+  @@unique([planId, code])
+}
+
+model Delivery {
+  id             String       @id @default(cuid())
+  projectId      String
+  costItemId     String
+  batchId        String?
+  deliveryNoteNo String
+  kind           DeliveryKind
+  date           String
+  qtyMilli       Int
+  invoiceCents   Int?
+  createdAt      DateTime     @default(now())
+  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  costItem       CostItem     @relation(fields: [costItemId], references: [id], onDelete: Cascade)
+  batch          ImportBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  @@unique([costItemId, deliveryNoteNo])
+}
+
+model ImportBatch {
+  id         String     @id @default(cuid())
+  projectId  String
+  fileName   String
+  totalRows  Int
+  okRows     Int
+  failedRows Int
+  errorsJson String // JSON: ImportRowError[]
+  createdAt  DateTime   @default(now())
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deliveries Delivery[]
+}
